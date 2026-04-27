@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import mimetypes
 import json
 import os
 import ssl
@@ -169,6 +170,8 @@ def normalize_base_url(base_url: str) -> str:
     base = base_url.rstrip("/")
     if base.endswith("/images/generations"):
         return base[: -len("/images/generations")]
+    if base.endswith("/images/edits"):
+        return base[: -len("/images/edits")]
     return base
 
 
@@ -177,6 +180,13 @@ def images_url(base_url: str) -> str:
     if base.endswith("/v1"):
         return f"{base}/images/generations"
     return f"{base}/v1/images/generations"
+
+
+def edits_url(base_url: str) -> str:
+    base = normalize_base_url(base_url)
+    if base.endswith("/v1"):
+        return f"{base}/images/edits"
+    return f"{base}/v1/images/edits"
 
 
 def model_url(base_url: str, model: str) -> str:
@@ -252,6 +262,56 @@ def request_headers(api_key: str, user_agent: str, accept: str) -> dict[str, str
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "User-Agent": user_agent,
     }
+
+
+def multipart_headers(api_key: str, user_agent: str, content_type: str, accept: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": content_type,
+        "Accept": accept,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "User-Agent": user_agent,
+    }
+
+
+def guess_mime(path: Path) -> str:
+    mime, _ = mimetypes.guess_type(str(path))
+    return mime or "application/octet-stream"
+
+
+def encode_multipart(fields: dict[str, Any], files: list[tuple[str, Path]]) -> tuple[bytes, str]:
+    boundary = f"codex-img-{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+
+    for key, value in fields.items():
+        if value is None:
+            continue
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
+        chunks.append(str(value).encode("utf-8"))
+        chunks.append(b"\r\n")
+
+    for field_name, path in files:
+        if not path.exists():
+            fail(f"Input image not found: {path}")
+        filename = path.name
+        mime = guess_mime(path)
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(
+            (
+                f'Content-Disposition: form-data; name="{field_name}"; '
+                f'filename="{filename}"\r\n'
+            ).encode()
+        )
+        chunks.append(f"Content-Type: {mime}\r\n\r\n".encode())
+        try:
+            chunks.append(path.read_bytes())
+        except OSError as exc:
+            fail(f"Failed to read input image {path}: {exc}")
+        chunks.append(b"\r\n")
+
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
 def request_with_tls_fallback(
@@ -418,6 +478,33 @@ def post_json(
         fail(f"Image request returned invalid JSON: {exc}")
 
 
+def post_multipart_json(
+    url: str,
+    api_key: str,
+    fields: dict[str, Any],
+    files: list[tuple[str, Path]],
+    timeout: int,
+    insecure: bool,
+    strict_tls: bool,
+    user_agent: str,
+) -> dict[str, Any]:
+    body, content_type = encode_multipart(fields, files)
+    req = request.Request(
+        url,
+        data=body,
+        headers=multipart_headers(api_key, user_agent, content_type, "application/json"),
+        method="POST",
+    )
+    try:
+        with request_with_tls_fallback(req, timeout, insecure, strict_tls, "Image edit request") as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body_text = http_error_text(exc)
+        fail(explain_http_error_body(exc, body_text))
+    except json.JSONDecodeError as exc:
+        fail(f"Image edit request returned invalid JSON: {exc}")
+
+
 def explain_http_error_body(exc: error.HTTPError, text: str) -> str:
     try:
         data = json.loads(text)
@@ -543,6 +630,57 @@ def post_stream(
         fail(explain_http_error_body(exc, body_text))
 
 
+def post_multipart_stream(
+    url: str,
+    api_key: str,
+    fields: dict[str, Any],
+    files: list[tuple[str, Path]],
+    timeout: int,
+    insecure: bool,
+    strict_tls: bool,
+    user_agent: str,
+    out_path: Path,
+) -> tuple[bytes, bool]:
+    body, content_type = encode_multipart(fields, files)
+    req = request.Request(
+        url,
+        data=body,
+        headers=multipart_headers(api_key, user_agent, content_type, "text/event-stream"),
+        method="POST",
+    )
+    try:
+        latest: bytes | None = None
+        partial_count = 0
+        model_seen = False
+        expected_model = str(fields.get("model") or "")
+        with request_with_tls_fallback(req, timeout, insecure, strict_tls, "Image edit stream") as response:
+            for event in iter_sse_json(response):
+                event_type = event.get("type") or event.get("event") or "event"
+                if expected_model and assert_response_model(event, expected_model):
+                    model_seen = True
+                image = image_bytes_from_event(event)
+                if image:
+                    latest = image
+                    if "partial" in str(event_type).lower():
+                        partial_count += 1
+                        partial_path = partial_output_path(out_path, partial_count)
+                        partial_path.parent.mkdir(parents=True, exist_ok=True)
+                        partial_path.write_bytes(image)
+                        log(f"saved partial image {partial_count}: {partial_path}")
+                    else:
+                        log(f"received image event: {event_type}")
+                elif event_type:
+                    log(f"stream event: {event_type}")
+        if latest:
+            return latest, model_seen
+        fail("Image edit stream completed without image data")
+    except error.HTTPError as exc:
+        body_text = http_error_text(exc)
+        if is_stream_unsupported(exc, body_text):
+            raise StreamUnsupported(body_text) from exc
+        fail(explain_http_error_body(exc, body_text))
+
+
 def fetch_url(url: str, timeout: int, insecure: bool, strict_tls: bool) -> bytes:
     attempts = [insecure]
     if not insecure and not strict_tls:
@@ -592,7 +730,9 @@ def generate(args: argparse.Namespace) -> int:
         fail("Prompt cannot be empty")
 
     api_key, base_url, config_insecure = resolve_config(args)
-    url = images_url(base_url)
+    input_images = [Path(p).expanduser() for p in args.image]
+    edit_mode = bool(input_images)
+    url = edits_url(base_url) if edit_mode else images_url(base_url)
     out_path = output_path(args.out, args.name)
     insecure = args.insecure or config_insecure
     if insecure:
@@ -614,13 +754,26 @@ def generate(args: argparse.Namespace) -> int:
         payload["stream"] = True
         payload["partial_images"] = args.partial_images
 
+    multipart_fields = payload.copy()
+    multipart_files: list[tuple[str, Path]] = []
+    if edit_mode:
+        field_name = args.image_field
+        if field_name == "auto":
+            field_name = "image" if len(input_images) == 1 else "image[]"
+        multipart_files.extend((field_name, path) for path in input_images)
+        if args.mask:
+            multipart_files.append(("mask", Path(args.mask).expanduser()))
+
     if args.dry_run:
         print(
             json.dumps(
                 {
                     "url": url,
                     "has_api_key": bool(api_key),
-                    "payload": payload,
+                    "mode": "edit" if edit_mode else "generation",
+                    "payload": payload if not edit_mode else multipart_fields,
+                    "images": [str(path) for path in input_images],
+                    "mask": args.mask,
                     "output": str(out_path),
                 },
                 ensure_ascii=False,
@@ -645,10 +798,55 @@ def generate(args: argparse.Namespace) -> int:
             log("model preflight skipped; endpoint did not expose compatible /models/{model}")
 
     log(f"POST {url}")
-    log(f"model={args.model} size={args.size} output={out_path}")
+    log(f"mode={'edit' if edit_mode else 'generation'} model={args.model} size={args.size} output={out_path}")
     image: bytes
     model_seen = False
-    if args.stream:
+    if edit_mode and args.stream:
+        try:
+            with progress("waiting for streaming image edit", args.progress_interval):
+                image, model_seen = post_multipart_stream(
+                    url,
+                    api_key,
+                    multipart_fields,
+                    multipart_files,
+                    args.timeout,
+                    insecure,
+                    args.strict_tls,
+                    args.user_agent,
+                    out_path,
+                )
+        except StreamUnsupported:
+            log("streaming unsupported by this endpoint; falling back to non-streaming edit request")
+            multipart_fields.pop("stream", None)
+            multipart_fields.pop("partial_images", None)
+            with progress("waiting for image edit", args.progress_interval):
+                response_data = post_multipart_json(
+                    url,
+                    api_key,
+                    multipart_fields,
+                    multipart_files,
+                    args.timeout,
+                    insecure,
+                    args.strict_tls,
+                    args.user_agent,
+                )
+            image = extract_image_bytes(response_data, args.timeout, insecure, args.strict_tls)
+            model_seen = assert_response_model(response_data, args.model)
+    elif edit_mode:
+        with progress("waiting for image edit", args.progress_interval):
+            response_data = post_multipart_json(
+                url,
+                api_key,
+                multipart_fields,
+                multipart_files,
+                args.timeout,
+                insecure,
+                args.strict_tls,
+                args.user_agent,
+            )
+        image = extract_image_bytes(response_data, args.timeout, insecure, args.strict_tls)
+        model_seen = assert_response_model(response_data, args.model)
+    elif args.stream:
         try:
             with progress("waiting for streaming image generation", args.progress_interval):
                 image, model_seen = post_stream(
@@ -721,6 +919,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate_parser.add_argument("--out", help="output image path")
     generate_parser.add_argument("--name", help="output filename prefix")
+    generate_parser.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="input image path for image editing; repeat for multiple images",
+    )
+    generate_parser.add_argument("--mask", help="mask image path for image editing")
+    generate_parser.add_argument(
+        "--image-field",
+        default="auto",
+        choices=("auto", "image", "image[]"),
+        help="multipart field name for input images (default: auto)",
+    )
     generate_parser.add_argument("--api-key", help="override API key")
     generate_parser.add_argument("--base-url", help="override base URL")
     generate_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="request timeout in seconds")

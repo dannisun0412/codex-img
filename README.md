@@ -1,6 +1,6 @@
 # codex-img
 
-Codex skill for generating images with an OpenAI-compatible `/v1/images/generations` endpoint.
+Codex skill for generating and editing images with OpenAI-compatible `/v1/images/generations` and `/v1/images/edits` endpoints.
 
 ## Install
 
@@ -74,9 +74,22 @@ CODEX_IMG_PYTHON=/opt/homebrew/bin/python3 scripts/codex-img generate "prompt"
 
 Use `--dry-run` to preview the request without calling the API.
 
+Edit or transform an existing image:
+
+```bash
+scripts/codex-img generate \
+  --image ./input.png \
+  --size 1024x1024 \
+  --out ./edited.png \
+  "Change the background to deep blue while preserving the product"
+```
+
+Use multiple reference images by repeating `--image`. Use `--mask ./mask.png` for masked edits when the provider supports masks.
+
 Reliability defaults:
 
 - Request payload always includes the selected `model`; default is `gpt-image-2`.
+- `--image` automatically switches from `/images/generations` to `/images/edits`.
 - `/v1/models/{model}` preflight runs when the endpoint supports it.
 - Response `model` fields are validated when present.
 - Image API streaming is enabled by default for `gpt-image-2`.

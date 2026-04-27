@@ -1,11 +1,11 @@
 ---
 name: codex-img
-description: Generate images through an OpenAI-compatible /v1/images/generations endpoint by automatically reading API keys and base URLs from the current Codex environment, including environment variables, ~/.codex/auth.json, and ~/.codex/config.toml. Use when the user asks to generate, draw, paint, create AI art, or save image files with gpt-image models or a custom image generation base URL.
+description: Generate or edit images through OpenAI-compatible /v1/images/generations and /v1/images/edits endpoints by automatically reading API keys and base URLs from the current Codex environment, including environment variables, ~/.codex/auth.json, and ~/.codex/config.toml. Use when the user asks to generate, draw, paint, create AI art, transform input images, edit images with masks, or save image files with gpt-image models or a custom image generation base URL.
 ---
 
 # Codex Img
 
-Generate images with the current Codex API configuration, especially OpenAI-compatible providers that expose `/v1/images/generations`.
+Generate or edit images with the current Codex API configuration, especially OpenAI-compatible providers that expose `/v1/images/generations` and `/v1/images/edits`.
 
 ## Quick Start
 
@@ -28,6 +28,19 @@ scripts/codex-img generate \
 Use `scripts/codex-img` on macOS/Linux and `scripts\codex-img.cmd` on Windows. The launcher resolves a Python 3.11+ runtime in this order: `CODEX_IMG_PYTHON`, `python3`, `python`, then `uv run python` on macOS/Linux; `CODEX_IMG_PYTHON`, `py -3`, `python`, `python3`, then `uv run python` on Windows. Prefer the launcher instead of calling `python` directly. When running from outside the skill folder, call the launcher by absolute path.
 
 Use `--dry-run` to inspect the resolved URL and payload without sending a request. The script redacts secret values.
+
+For input-image editing, pass one or more `--image` paths. This switches to `/v1/images/edits` and sends a multipart request:
+
+```bash
+scripts/codex-img generate \
+  --image ./input.png \
+  --mask ./mask.png \
+  --size 1024x1024 \
+  --out ./edited.png \
+  "把背景改成深蓝色，保留主体"
+```
+
+Use repeated `--image` flags for multiple reference images. Omit `--mask` for reference-based transformations.
 
 The script uses Image API streaming by default, saves partial images, sends a browser-like `User-Agent`, logs waiting progress every 30 seconds, and automatically retries once without TLS certificate verification when a custom endpoint fails with `CERTIFICATE_VERIFY_FAILED`. Use `codex_img_insecure = true` in provider config to skip the failed TLS probe for a trusted endpoint, `--no-stream` if a provider behaves badly with SSE, `--strict-tls` to disable TLS fallback, or `--insecure` to skip TLS verification immediately.
 
@@ -71,7 +84,7 @@ The script sends:
 }
 ```
 
-It accepts either streamed image events, `data[0].b64_json`, or `data[0].url`, decodes or downloads the image, and saves it to `~/.codex/generated_images/codex-img/` unless `--out` is provided. Partial streamed images are saved next to the target output as `.partial-N` files.
+It accepts either streamed image events, `data[0].b64_json`, or `data[0].url`, decodes or downloads the image, and saves it to `~/.codex/generated_images/codex-img/` unless `--out` is provided. Partial streamed images are saved next to the target output as `.partial-N` files. `--image` paths are read from disk and sent as multipart `image` / `image[]` fields; `--mask` is sent as multipart `mask`.
 
 For long image generations, prefer streaming because partial-image events keep the connection active and reduce upstream idle-timeout risk. If an endpoint blocks automation at Cloudflare, the script reports the Cloudflare code and detail instead of a generic HTTP 403.
 
