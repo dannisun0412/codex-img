@@ -13,11 +13,23 @@ Restart Codex after installing the skill.
 
 ## Configure
 
-Set environment variables:
+The skill automatically reads the current user's Codex config:
+
+- macOS/Linux: `~/.codex/auth.json` and `~/.codex/config.toml`
+- Windows: `%USERPROFILE%\.codex\auth.json` and `%USERPROFILE%\.codex\config.toml`
+
+Expected fields:
+
+- `OPENAI_API_KEY` from `auth.json` or the environment
+- `base_url` from `config.toml`, `auth.json`, or the environment
+
+You can also set environment variables:
 
 ```bash
 export OPENAI_API_KEY="your-api-key"
 export OPENAI_BASE_URL="https://ai.transferai.cc/v1"
+# or:
+export base_url="https://ai.transferai.cc/v1"
 ```
 
 Or configure Codex:

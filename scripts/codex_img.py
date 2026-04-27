@@ -35,7 +35,11 @@ def fail(message: str) -> NoReturn:
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    home = os.environ.get("USERPROFILE") or str(Path.home())
+    return Path(home) / ".codex"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -114,7 +118,12 @@ def resolve_config(args: argparse.Namespace) -> tuple[str, str]:
     base_url = first_string(
         args.base_url,
         os.environ.get("OPENAI_BASE_URL"),
+        os.environ.get("base_url"),
+        os.environ.get("BASE_URL"),
         os.environ.get("TRANSFERAI_BASE_URL"),
+        auth.get("base_url"),
+        auth.get("BASE_URL"),
+        auth.get("OPENAI_BASE_URL"),
         provider.get("base_url") if isinstance(provider, dict) else None,
         config.get("base_url"),
         DEFAULT_BASE_URL,

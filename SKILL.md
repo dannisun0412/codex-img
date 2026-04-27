@@ -29,12 +29,17 @@ Use `--dry-run` to inspect the resolved URL and payload without sending a reques
 
 ## Configuration
 
-Resolve credentials in this order:
+Resolve credentials automatically from the current OS user config:
+
+- macOS/Linux: `~/.codex/auth.json` and `~/.codex/config.toml`
+- Windows: `%USERPROFILE%\.codex\auth.json` and `%USERPROFILE%\.codex\config.toml`
+
+Resolve values in this order:
 
 1. CLI flags: `--api-key`, `--base-url`
-2. Environment variables: `OPENAI_API_KEY`, `TRANSFERAI_API_KEY`, `OPENAI_BASE_URL`, `TRANSFERAI_BASE_URL`
-3. `~/.codex/auth.json`: `OPENAI_API_KEY`, `api_key`, or `openai_api_key`
-4. `~/.codex/config.toml`: selected `model_provider`, matching `[model_providers.<name>]`, `base_url`, `api_key`, or `api_key_env_var`
+2. Environment variables: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `base_url`
+3. `auth.json`: `OPENAI_API_KEY` and optional `base_url`
+4. `config.toml`: top-level `base_url`, selected `model_provider`, matching `[model_providers.<name>]`, `base_url`, `api_key`, or `api_key_env_var`
 5. Default base URL: `https://ai.transferai.cc/v1`
 
 Never print API keys. Never commit local config or generated images unless the user explicitly asks.
