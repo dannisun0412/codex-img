@@ -12,18 +12,20 @@ Generate images with the current Codex API configuration, especially OpenAI-comp
 Run the bundled script:
 
 ```bash
-python scripts/codex_img.py generate "给我画一个哆啦A梦版的大模型知识图"
+scripts/codex-img generate "给我画一个哆啦A梦版的大模型知识图"
 ```
 
 Common options:
 
 ```bash
-python scripts/codex_img.py generate \
+scripts/codex-img generate \
   --model gpt-image-2 \
   --size 1792x1024 \
   --out ./image.png \
   "给我画一个哆啦A梦版的大模型知识图"
 ```
+
+Use `scripts/codex-img` on macOS/Linux and `scripts\codex-img.cmd` on Windows. The launcher resolves a Python 3.11+ runtime in this order: `CODEX_IMG_PYTHON`, `python3`, `python`, then `uv run python` on macOS/Linux; `CODEX_IMG_PYTHON`, `py -3`, `python`, `python3`, then `uv run python` on Windows. Prefer the launcher instead of calling `python` directly. When running from outside the skill folder, call the launcher by absolute path.
 
 Use `--dry-run` to inspect the resolved URL and payload without sending a request. The script redacts secret values.
 
@@ -45,6 +47,12 @@ Resolve values in this order:
 5. Default base URL: `https://ai.transferai.cc/v1`
 
 Never print API keys. Never commit local config or generated images unless the user explicitly asks.
+
+If no Python 3.11+ runtime is found, set `CODEX_IMG_PYTHON` to the absolute path of a valid interpreter, for example:
+
+```bash
+CODEX_IMG_PYTHON=/opt/homebrew/bin/python3 /path/to/codex-img/scripts/codex-img generate "prompt"
+```
 
 ## Script Behavior
 

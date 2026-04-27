@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PY_SCRIPT="$SCRIPT_DIR/codex_img.py"
+
+can_run() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+}
+
+if [ -n "${CODEX_IMG_PYTHON:-}" ]; then
+  if ! can_run "$CODEX_IMG_PYTHON"; then
+    printf '%s\n' "codex-img: CODEX_IMG_PYTHON must point to Python 3.11+." >&2
+    exit 127
+  fi
+  exec "$CODEX_IMG_PYTHON" "$PY_SCRIPT" "$@"
+fi
+
+if command -v python3 >/dev/null 2>&1 && can_run python3; then
+  exec python3 "$PY_SCRIPT" "$@"
+fi
+
+if command -v python >/dev/null 2>&1 && can_run python; then
+  exec python "$PY_SCRIPT" "$@"
+fi
+
+if command -v uv >/dev/null 2>&1; then
+  exec uv run python "$PY_SCRIPT" "$@"
+fi
+
+printf '%s\n' "codex-img: no Python runtime found. Install Python 3.11+ or set CODEX_IMG_PYTHON." >&2
+exit 127

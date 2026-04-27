@@ -54,10 +54,22 @@ codex_img_insecure = true
 ## Use
 
 ```bash
-python scripts/codex_img.py generate \
+scripts/codex-img generate \
   --model gpt-image-2 \
   --size 1792x1024 \
   "给我画一个哆啦A梦版的大模型知识图"
+```
+
+Windows:
+
+```bat
+scripts\codex-img.cmd generate --model gpt-image-2 --size 1792x1024 "给我画一个哆啦A梦版的大模型知识图"
+```
+
+The launcher chooses a Python 3.11+ runtime automatically. Set `CODEX_IMG_PYTHON` to force a specific Python executable:
+
+```bash
+CODEX_IMG_PYTHON=/opt/homebrew/bin/python3 scripts/codex-img generate "prompt"
 ```
 
 Use `--dry-run` to preview the request without calling the API.
@@ -77,17 +89,17 @@ Advanced flags:
 
 ```bash
 # Fail instead of auto-fallback when TLS certificate verification fails.
-python scripts/codex_img.py generate --strict-tls "prompt"
+scripts/codex-img generate --strict-tls "prompt"
 
 # Disable TLS verification immediately for a trusted custom endpoint.
-python scripts/codex_img.py generate --insecure "prompt"
+scripts/codex-img generate --insecure "prompt"
 
 # Change waiting log cadence, or disable it with 0.
-python scripts/codex_img.py generate --progress-interval 10 "prompt"
+scripts/codex-img generate --progress-interval 10 "prompt"
 
 # Disable streaming when a provider behaves badly with SSE.
-python scripts/codex_img.py generate --no-stream "prompt"
+scripts/codex-img generate --no-stream "prompt"
 
 # Faster/lighter generation for slow gateways.
-python scripts/codex_img.py generate --quality low --size 1024x1024 "prompt"
+scripts/codex-img generate --quality low --size 1024x1024 "prompt"
 ```
