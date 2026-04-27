@@ -27,7 +27,7 @@ python scripts/codex_img.py generate \
 
 Use `--dry-run` to inspect the resolved URL and payload without sending a request. The script redacts secret values.
 
-The script sends a browser-like `User-Agent`, logs waiting progress every 30 seconds, and automatically retries once without TLS certificate verification when a custom endpoint fails with `CERTIFICATE_VERIFY_FAILED`. Use `--strict-tls` to disable that fallback, or `--insecure` to skip TLS verification immediately for a trusted endpoint.
+The script uses Image API streaming by default, saves partial images, sends a browser-like `User-Agent`, logs waiting progress every 30 seconds, and automatically retries once without TLS certificate verification when a custom endpoint fails with `CERTIFICATE_VERIFY_FAILED`. Use `--no-stream` if a provider behaves badly with SSE, `--strict-tls` to disable TLS fallback, or `--insecure` to skip TLS verification immediately for a trusted endpoint.
 
 ## Configuration
 
@@ -55,10 +55,12 @@ The script sends:
   "model": "gpt-image-2",
   "prompt": "...",
   "size": "1792x1024",
-  "response_format": "b64_json"
+  "response_format": "b64_json",
+  "stream": true,
+  "partial_images": 2
 }
 ```
 
-It accepts either `data[0].b64_json` or `data[0].url`, decodes or downloads the image, and saves it to `~/.codex/generated_images/codex-img/` unless `--out` is provided.
+It accepts either streamed image events, `data[0].b64_json`, or `data[0].url`, decodes or downloads the image, and saves it to `~/.codex/generated_images/codex-img/` unless `--out` is provided. Partial streamed images are saved next to the target output as `.partial-N` files.
 
-For long image generations, keep waiting while the script logs `waiting for image generation`. If an endpoint blocks automation at Cloudflare, the script reports the Cloudflare code and detail instead of a generic HTTP 403.
+For long image generations, prefer streaming because partial-image events keep the connection active and reduce upstream idle-timeout risk. If an endpoint blocks automation at Cloudflare, the script reports the Cloudflare code and detail instead of a generic HTTP 403.

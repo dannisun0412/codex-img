@@ -27,12 +27,17 @@ DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "1792x1024"
 DEFAULT_RESPONSE_FORMAT = "b64_json"
 DEFAULT_TIMEOUT = 600
+DEFAULT_PARTIAL_IMAGES = 2
 DEFAULT_PROGRESS_INTERVAL = 30
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+class StreamUnsupported(Exception):
+    """Raised when a provider rejects Image API streaming parameters."""
 
 
 def log(message: str) -> None:
@@ -199,6 +204,30 @@ def explain_http_error(exc: error.HTTPError) -> str:
     return f"Image request failed: status={exc.code}\n{text}"
 
 
+def http_error_text(exc: error.HTTPError) -> str:
+    return exc.read().decode("utf-8", errors="replace")
+
+
+def is_stream_unsupported(exc: error.HTTPError, body: str) -> bool:
+    text = body.lower()
+    return exc.code in {400, 404, 422} and (
+        "stream" in text
+        or "partial_images" in text
+        or "unknown parameter" in text
+        or "unsupported" in text
+    )
+
+
+def request_headers(api_key: str, user_agent: str, accept: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": accept,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "User-Agent": user_agent,
+    }
+
+
 @contextmanager
 def progress(message: str, interval: int) -> Iterator[None]:
     if interval <= 0:
@@ -235,13 +264,7 @@ def post_json(
     req = request.Request(
         url,
         data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "User-Agent": user_agent,
-        },
+        headers=request_headers(api_key, user_agent, "application/json"),
         method="POST",
     )
     attempts = [insecure]
@@ -259,7 +282,8 @@ def post_json(
             with request.urlopen(req, timeout=timeout, context=ssl_context(use_insecure)) as response:
                 return json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
-            fail(explain_http_error(exc))
+            body_text = http_error_text(exc)
+            fail(explain_http_error_body(exc, body_text))
         except error.URLError as exc:
             if is_ssl_cert_error(exc) and not use_insecure and not strict_tls:
                 last_error = exc
@@ -269,6 +293,144 @@ def post_json(
             fail(f"Image request returned invalid JSON: {exc}")
 
     fail(f"Image request failed: {last_error}")
+
+
+def explain_http_error_body(exc: error.HTTPError, text: str) -> str:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = {}
+
+    if isinstance(data, dict) and data.get("cloudflare_error"):
+        code = data.get("error_code") or exc.code
+        name = data.get("error_name") or "cloudflare_error"
+        detail = data.get("detail") or text
+        return (
+            f"Image request blocked by Cloudflare: status={exc.code} "
+            f"code={code} name={name}\n{detail}"
+        )
+    return f"Image request failed: status={exc.code}\n{text}"
+
+
+def decode_b64_image(value: Any) -> bytes | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return base64.b64decode(value)
+    except ValueError:
+        return None
+
+
+def image_bytes_from_event(event: dict[str, Any]) -> bytes | None:
+    for key in ("b64_json", "image_b64", "result"):
+        image = decode_b64_image(event.get(key))
+        if image:
+            return image
+
+    for container_key in ("data", "item", "output", "response"):
+        container = event.get(container_key)
+        if isinstance(container, dict):
+            image = image_bytes_from_event(container)
+            if image:
+                return image
+        elif isinstance(container, list):
+            for item in container:
+                if isinstance(item, dict):
+                    image = image_bytes_from_event(item)
+                    if image:
+                        return image
+    return None
+
+
+def partial_output_path(out_path: Path, index: int) -> Path:
+    suffix = out_path.suffix or ".png"
+    return out_path.with_name(f"{out_path.stem}.partial-{index}{suffix}")
+
+
+def iter_sse_json(response: Any) -> Iterator[dict[str, Any]]:
+    buffer = ""
+    data_lines: list[str] = []
+    for chunk in iter(lambda: response.read(4096), b""):
+        buffer += chunk.decode("utf-8", errors="replace")
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            if not line:
+                if data_lines:
+                    data = "\n".join(data_lines)
+                    data_lines = []
+                    if data == "[DONE]":
+                        return
+                    try:
+                        yield json.loads(data)
+                    except json.JSONDecodeError:
+                        log(f"ignored non-JSON SSE data: {data[:120]}")
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+
+
+def post_stream(
+    url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: int,
+    insecure: bool,
+    strict_tls: bool,
+    user_agent: str,
+    out_path: Path,
+) -> bytes:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        url,
+        data=body,
+        headers=request_headers(api_key, user_agent, "text/event-stream"),
+        method="POST",
+    )
+    attempts = [insecure]
+    if not insecure and not strict_tls:
+        attempts.append(True)
+
+    last_error: error.URLError | None = None
+    for attempt, use_insecure in enumerate(attempts, start=1):
+        if use_insecure and attempt > 1:
+            log("TLS certificate verification failed; retrying stream once with verification disabled")
+        elif use_insecure:
+            log("warning: TLS certificate verification is disabled for this request")
+        try:
+            latest: bytes | None = None
+            partial_count = 0
+            with request.urlopen(req, timeout=timeout, context=ssl_context(use_insecure)) as response:
+                for event in iter_sse_json(response):
+                    event_type = event.get("type") or event.get("event") or "event"
+                    image = image_bytes_from_event(event)
+                    if image:
+                        latest = image
+                        if "partial" in str(event_type).lower():
+                            partial_count += 1
+                            partial_path = partial_output_path(out_path, partial_count)
+                            partial_path.parent.mkdir(parents=True, exist_ok=True)
+                            partial_path.write_bytes(image)
+                            log(f"saved partial image {partial_count}: {partial_path}")
+                        else:
+                            log(f"received image event: {event_type}")
+                    elif event_type:
+                        log(f"stream event: {event_type}")
+            if latest:
+                return latest
+            fail("Stream completed without image data")
+        except error.HTTPError as exc:
+            body_text = http_error_text(exc)
+            if is_stream_unsupported(exc, body_text):
+                raise StreamUnsupported(body_text) from exc
+            fail(explain_http_error_body(exc, body_text))
+        except error.URLError as exc:
+            if is_ssl_cert_error(exc) and not use_insecure and not strict_tls:
+                last_error = exc
+                continue
+            fail(f"Image stream failed: {exc}")
+
+    fail(f"Image stream failed: {last_error}")
 
 
 def fetch_url(url: str, timeout: int, insecure: bool, strict_tls: bool) -> bytes:
@@ -329,6 +491,15 @@ def generate(args: argparse.Namespace) -> int:
         "size": args.size,
         "response_format": args.response_format,
     }
+    if args.quality:
+        payload["quality"] = args.quality
+    if args.output_format:
+        payload["output_format"] = args.output_format
+    if args.compression is not None:
+        payload["output_compression"] = args.compression
+    if args.stream:
+        payload["stream"] = True
+        payload["partial_images"] = args.partial_images
 
     if args.dry_run:
         print(
@@ -347,17 +518,47 @@ def generate(args: argparse.Namespace) -> int:
 
     log(f"POST {url}")
     log(f"model={args.model} size={args.size} output={out_path}")
-    with progress("waiting for image generation", args.progress_interval):
-        response_data = post_json(
-            url,
-            api_key,
-            payload,
-            args.timeout,
-            args.insecure,
-            args.strict_tls,
-            args.user_agent,
-        )
-    image = extract_image_bytes(response_data, args.timeout, args.insecure, args.strict_tls)
+    image: bytes
+    if args.stream:
+        try:
+            with progress("waiting for streaming image generation", args.progress_interval):
+                image = post_stream(
+                    url,
+                    api_key,
+                    payload,
+                    args.timeout,
+                    args.insecure,
+                    args.strict_tls,
+                    args.user_agent,
+                    out_path,
+                )
+        except StreamUnsupported:
+            log("streaming unsupported by this endpoint; falling back to non-streaming request")
+            payload.pop("stream", None)
+            payload.pop("partial_images", None)
+            with progress("waiting for image generation", args.progress_interval):
+                response_data = post_json(
+                    url,
+                    api_key,
+                    payload,
+                    args.timeout,
+                    args.insecure,
+                    args.strict_tls,
+                    args.user_agent,
+                )
+            image = extract_image_bytes(response_data, args.timeout, args.insecure, args.strict_tls)
+    else:
+        with progress("waiting for image generation", args.progress_interval):
+            response_data = post_json(
+                url,
+                api_key,
+                payload,
+                args.timeout,
+                args.insecure,
+                args.strict_tls,
+                args.user_agent,
+            )
+        image = extract_image_bytes(response_data, args.timeout, args.insecure, args.strict_tls)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(image)
     log(f"saved {out_path}")
@@ -373,6 +574,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("prompt", help="image prompt")
     generate_parser.add_argument("--model", default=DEFAULT_MODEL, help=f"model name (default: {DEFAULT_MODEL})")
     generate_parser.add_argument("--size", default=DEFAULT_SIZE, help=f"image size (default: {DEFAULT_SIZE})")
+    generate_parser.add_argument("--quality", choices=("low", "medium", "high", "auto"), help="image quality")
+    generate_parser.add_argument("--output-format", choices=("png", "jpeg", "webp"), help="image output format")
+    generate_parser.add_argument("--compression", type=int, choices=range(0, 101), metavar="0-100", help="jpeg/webp compression")
     generate_parser.add_argument(
         "--response-format",
         default=DEFAULT_RESPONSE_FORMAT,
@@ -391,6 +595,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds between waiting progress logs; use 0 to disable",
     )
     generate_parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="HTTP User-Agent header")
+    generate_parser.add_argument("--stream", dest="stream", action="store_true", default=True, help="use Image API streaming")
+    generate_parser.add_argument("--no-stream", dest="stream", action="store_false", help="disable Image API streaming")
+    generate_parser.add_argument(
+        "--partial-images",
+        type=int,
+        default=DEFAULT_PARTIAL_IMAGES,
+        choices=range(0, 4),
+        metavar="0-3",
+        help=f"number of partial images to request while streaming (default: {DEFAULT_PARTIAL_IMAGES})",
+    )
     generate_parser.add_argument(
         "--insecure",
         action="store_true",
