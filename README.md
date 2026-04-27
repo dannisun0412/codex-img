@@ -53,4 +53,22 @@ python scripts/codex_img.py generate \
 
 Use `--dry-run` to preview the request without calling the API.
 
-If a trusted custom endpoint fails with a local certificate-chain error, retry with `--insecure`.
+Reliability defaults:
+
+- Browser-like `User-Agent` header for custom gateways.
+- Waiting progress log every 30 seconds.
+- Automatic one-time TLS fallback for local `CERTIFICATE_VERIFY_FAILED` issues.
+- Clear Cloudflare block messages when a gateway rejects automated traffic.
+
+Advanced flags:
+
+```bash
+# Fail instead of auto-fallback when TLS certificate verification fails.
+python scripts/codex_img.py generate --strict-tls "prompt"
+
+# Disable TLS verification immediately for a trusted custom endpoint.
+python scripts/codex_img.py generate --insecure "prompt"
+
+# Change waiting log cadence, or disable it with 0.
+python scripts/codex_img.py generate --progress-interval 10 "prompt"
+```

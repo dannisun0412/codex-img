@@ -27,7 +27,7 @@ python scripts/codex_img.py generate \
 
 Use `--dry-run` to inspect the resolved URL and payload without sending a request. The script redacts secret values.
 
-If a custom endpoint fails with a local TLS certificate-chain error, retry with `--insecure` only for that trusted endpoint.
+The script sends a browser-like `User-Agent`, logs waiting progress every 30 seconds, and automatically retries once without TLS certificate verification when a custom endpoint fails with `CERTIFICATE_VERIFY_FAILED`. Use `--strict-tls` to disable that fallback, or `--insecure` to skip TLS verification immediately for a trusted endpoint.
 
 ## Configuration
 
@@ -60,3 +60,5 @@ The script sends:
 ```
 
 It accepts either `data[0].b64_json` or `data[0].url`, decodes or downloads the image, and saves it to `~/.codex/generated_images/codex-img/` unless `--out` is provided.
+
+For long image generations, keep waiting while the script logs `waiting for image generation`. If an endpoint blocks automation at Cloudflare, the script reports the Cloudflare code and detail instead of a generic HTTP 403.

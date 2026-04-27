@@ -8,9 +8,12 @@ import json
 import os
 import ssl
 import sys
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Iterator, NoReturn
 from urllib import error, request
 
 try:
@@ -24,6 +27,7 @@ DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "1792x1024"
 DEFAULT_RESPONSE_FORMAT = "b64_json"
 DEFAULT_TIMEOUT = 600
+DEFAULT_PROGRESS_INTERVAL = 30
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -164,9 +168,58 @@ def output_path(out: str | None, name: str | None) -> Path:
 
 def ssl_context(insecure: bool) -> ssl.SSLContext | None:
     if insecure:
-        log("warning: TLS certificate verification is disabled for this request")
         return ssl._create_unverified_context()
     return None
+
+
+def is_ssl_cert_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    while current:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        current = current.__cause__ or current.__context__
+    return "CERTIFICATE_VERIFY_FAILED" in str(exc)
+
+
+def explain_http_error(exc: error.HTTPError) -> str:
+    text = exc.read().decode("utf-8", errors="replace")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = {}
+
+    if isinstance(data, dict) and data.get("cloudflare_error"):
+        code = data.get("error_code") or exc.code
+        name = data.get("error_name") or "cloudflare_error"
+        detail = data.get("detail") or text
+        return (
+            f"Image request blocked by Cloudflare: status={exc.code} "
+            f"code={code} name={name}\n{detail}"
+        )
+    return f"Image request failed: status={exc.code}\n{text}"
+
+
+@contextmanager
+def progress(message: str, interval: int) -> Iterator[None]:
+    if interval <= 0:
+        yield
+        return
+
+    stopped = threading.Event()
+    started = time.monotonic()
+
+    def run() -> None:
+        while not stopped.wait(interval):
+            elapsed = int(time.monotonic() - started)
+            log(f"{message} ({elapsed}s elapsed)")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=1)
 
 
 def post_json(
@@ -175,6 +228,7 @@ def post_json(
     payload: dict[str, Any],
     timeout: int,
     insecure: bool,
+    strict_tls: bool,
     user_agent: str,
 ) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -190,27 +244,54 @@ def post_json(
         },
         method="POST",
     )
-    try:
-        with request.urlopen(req, timeout=timeout, context=ssl_context(insecure)) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        text = exc.read().decode("utf-8", errors="replace")
-        fail(f"Image request failed: status={exc.code}\n{text}")
-    except error.URLError as exc:
-        fail(f"Image request failed: {exc}")
-    except json.JSONDecodeError as exc:
-        fail(f"Image request returned invalid JSON: {exc}")
+    attempts = [insecure]
+    if not insecure and not strict_tls:
+        attempts.append(True)
+
+    last_error: error.URLError | None = None
+    for attempt, use_insecure in enumerate(attempts, start=1):
+        if use_insecure:
+            if attempt > 1:
+                log("TLS certificate verification failed; retrying once with verification disabled")
+            else:
+                log("warning: TLS certificate verification is disabled for this request")
+        try:
+            with request.urlopen(req, timeout=timeout, context=ssl_context(use_insecure)) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            fail(explain_http_error(exc))
+        except error.URLError as exc:
+            if is_ssl_cert_error(exc) and not use_insecure and not strict_tls:
+                last_error = exc
+                continue
+            fail(f"Image request failed: {exc}")
+        except json.JSONDecodeError as exc:
+            fail(f"Image request returned invalid JSON: {exc}")
+
+    fail(f"Image request failed: {last_error}")
 
 
-def fetch_url(url: str, timeout: int, insecure: bool) -> bytes:
-    try:
-        with request.urlopen(url, timeout=timeout, context=ssl_context(insecure)) as response:
-            return response.read()
-    except error.URLError as exc:
-        fail(f"Failed to download image URL: {exc}")
+def fetch_url(url: str, timeout: int, insecure: bool, strict_tls: bool) -> bytes:
+    attempts = [insecure]
+    if not insecure and not strict_tls:
+        attempts.append(True)
+
+    last_error: error.URLError | None = None
+    for use_insecure in attempts:
+        try:
+            with request.urlopen(url, timeout=timeout, context=ssl_context(use_insecure)) as response:
+                return response.read()
+        except error.URLError as exc:
+            if is_ssl_cert_error(exc) and not use_insecure and not strict_tls:
+                last_error = exc
+                continue
+            fail(f"Failed to download image URL: {exc}")
+    fail(f"Failed to download image URL: {last_error}")
 
 
-def extract_image_bytes(response_data: dict[str, Any], timeout: int, insecure: bool) -> bytes:
+def extract_image_bytes(
+    response_data: dict[str, Any], timeout: int, insecure: bool, strict_tls: bool
+) -> bytes:
     items = response_data.get("data")
     if not isinstance(items, list) or not items:
         fail(f"Response did not contain image data: {json.dumps(response_data, ensure_ascii=False)[:1200]}")
@@ -228,7 +309,7 @@ def extract_image_bytes(response_data: dict[str, Any], timeout: int, insecure: b
 
     url = first.get("url")
     if isinstance(url, str) and url:
-        return fetch_url(url, timeout, insecure)
+        return fetch_url(url, timeout, insecure, strict_tls)
 
     fail(f"Image item did not contain b64_json or url: {json.dumps(first, ensure_ascii=False)[:1200]}")
 
@@ -266,8 +347,17 @@ def generate(args: argparse.Namespace) -> int:
 
     log(f"POST {url}")
     log(f"model={args.model} size={args.size} output={out_path}")
-    response_data = post_json(url, api_key, payload, args.timeout, args.insecure, args.user_agent)
-    image = extract_image_bytes(response_data, args.timeout, args.insecure)
+    with progress("waiting for image generation", args.progress_interval):
+        response_data = post_json(
+            url,
+            api_key,
+            payload,
+            args.timeout,
+            args.insecure,
+            args.strict_tls,
+            args.user_agent,
+        )
+    image = extract_image_bytes(response_data, args.timeout, args.insecure, args.strict_tls)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(image)
     log(f"saved {out_path}")
@@ -294,11 +384,22 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--api-key", help="override API key")
     generate_parser.add_argument("--base-url", help="override base URL")
     generate_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="request timeout in seconds")
+    generate_parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=DEFAULT_PROGRESS_INTERVAL,
+        help="seconds between waiting progress logs; use 0 to disable",
+    )
     generate_parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="HTTP User-Agent header")
     generate_parser.add_argument(
         "--insecure",
         action="store_true",
-        help="disable TLS certificate verification for custom endpoints with local certificate issues",
+        help="disable TLS certificate verification immediately",
+    )
+    generate_parser.add_argument(
+        "--strict-tls",
+        action="store_true",
+        help="fail on TLS certificate errors instead of auto-retrying with verification disabled",
     )
     generate_parser.add_argument("--dry-run", action="store_true", help="print request details without calling API")
     generate_parser.set_defaults(func=generate)
