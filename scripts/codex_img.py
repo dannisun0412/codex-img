@@ -6,6 +6,7 @@ import argparse
 import base64
 import json
 import os
+import ssl
 import sys
 import uuid
 from pathlib import Path
@@ -23,6 +24,11 @@ DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "1792x1024"
 DEFAULT_RESPONSE_FORMAT = "b64_json"
 DEFAULT_TIMEOUT = 600
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 def log(message: str) -> None:
@@ -156,7 +162,21 @@ def output_path(out: str | None, name: str | None) -> Path:
     return directory / f"{prefix}-{uuid.uuid4().hex[:8]}.png"
 
 
-def post_json(url: str, api_key: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+def ssl_context(insecure: bool) -> ssl.SSLContext | None:
+    if insecure:
+        log("warning: TLS certificate verification is disabled for this request")
+        return ssl._create_unverified_context()
+    return None
+
+
+def post_json(
+    url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: int,
+    insecure: bool,
+    user_agent: str,
+) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = request.Request(
         url,
@@ -165,11 +185,13 @@ def post_json(url: str, api_key: str, payload: dict[str, Any], timeout: int) -> 
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "User-Agent": user_agent,
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=timeout) as response:
+        with request.urlopen(req, timeout=timeout, context=ssl_context(insecure)) as response:
             return json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
         text = exc.read().decode("utf-8", errors="replace")
@@ -180,15 +202,15 @@ def post_json(url: str, api_key: str, payload: dict[str, Any], timeout: int) -> 
         fail(f"Image request returned invalid JSON: {exc}")
 
 
-def fetch_url(url: str, timeout: int) -> bytes:
+def fetch_url(url: str, timeout: int, insecure: bool) -> bytes:
     try:
-        with request.urlopen(url, timeout=timeout) as response:
+        with request.urlopen(url, timeout=timeout, context=ssl_context(insecure)) as response:
             return response.read()
     except error.URLError as exc:
         fail(f"Failed to download image URL: {exc}")
 
 
-def extract_image_bytes(response_data: dict[str, Any], timeout: int) -> bytes:
+def extract_image_bytes(response_data: dict[str, Any], timeout: int, insecure: bool) -> bytes:
     items = response_data.get("data")
     if not isinstance(items, list) or not items:
         fail(f"Response did not contain image data: {json.dumps(response_data, ensure_ascii=False)[:1200]}")
@@ -206,7 +228,7 @@ def extract_image_bytes(response_data: dict[str, Any], timeout: int) -> bytes:
 
     url = first.get("url")
     if isinstance(url, str) and url:
-        return fetch_url(url, timeout)
+        return fetch_url(url, timeout, insecure)
 
     fail(f"Image item did not contain b64_json or url: {json.dumps(first, ensure_ascii=False)[:1200]}")
 
@@ -244,8 +266,8 @@ def generate(args: argparse.Namespace) -> int:
 
     log(f"POST {url}")
     log(f"model={args.model} size={args.size} output={out_path}")
-    response_data = post_json(url, api_key, payload, args.timeout)
-    image = extract_image_bytes(response_data, args.timeout)
+    response_data = post_json(url, api_key, payload, args.timeout, args.insecure, args.user_agent)
+    image = extract_image_bytes(response_data, args.timeout, args.insecure)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(image)
     log(f"saved {out_path}")
@@ -272,6 +294,12 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--api-key", help="override API key")
     generate_parser.add_argument("--base-url", help="override base URL")
     generate_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="request timeout in seconds")
+    generate_parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="HTTP User-Agent header")
+    generate_parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="disable TLS certificate verification for custom endpoints with local certificate issues",
+    )
     generate_parser.add_argument("--dry-run", action="store_true", help="print request details without calling API")
     generate_parser.set_defaults(func=generate)
 

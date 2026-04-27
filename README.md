@@ -52,3 +52,5 @@ python scripts/codex_img.py generate \
 ```
 
 Use `--dry-run` to preview the request without calling the API.
+
+If a trusted custom endpoint fails with a local certificate-chain error, retry with `--insecure`.

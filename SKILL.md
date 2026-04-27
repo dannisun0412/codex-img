@@ -27,6 +27,8 @@ python scripts/codex_img.py generate \
 
 Use `--dry-run` to inspect the resolved URL and payload without sending a request. The script redacts secret values.
 
+If a custom endpoint fails with a local TLS certificate-chain error, retry with `--insecure` only for that trusted endpoint.
+
 ## Configuration
 
 Resolve credentials automatically from the current OS user config:
