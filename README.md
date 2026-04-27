@@ -42,6 +42,15 @@ base_url = "https://ai.transferai.cc/v1"
 api_key_env_var = "TRANSFERAI_API_KEY"
 ```
 
+For a trusted custom gateway with local certificate-chain issues, configure this once instead of passing `--insecure`:
+
+```toml
+[model_providers.transferai]
+base_url = "https://ai.transferai.cc/v1"
+api_key_env_var = "TRANSFERAI_API_KEY"
+codex_img_insecure = true
+```
+
 ## Use
 
 ```bash
@@ -61,6 +70,7 @@ Reliability defaults:
 - Browser-like `User-Agent` header for custom gateways.
 - Waiting progress log every 30 seconds.
 - Automatic one-time TLS fallback for local `CERTIFICATE_VERIFY_FAILED` issues.
+- Optional `codex_img_insecure = true` config to skip the failed TLS probe for trusted gateways.
 - Clear Cloudflare block messages when a gateway rejects automated traffic.
 
 Advanced flags:

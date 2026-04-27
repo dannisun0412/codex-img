@@ -106,7 +106,17 @@ def provider_api_key(provider: dict[str, Any]) -> str | None:
     return first_string(provider.get("api_key"), provider.get("openai_api_key"))
 
 
-def resolve_config(args: argparse.Namespace) -> tuple[str, str]:
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def resolve_config(args: argparse.Namespace) -> tuple[str, str, bool]:
     home = codex_home()
     auth_path = Path(os.environ.get("CODEX_AUTH_FILE", home / "auth.json")).expanduser()
     config_path = Path(os.environ.get("CODEX_CONFIG_FILE", home / "config.toml")).expanduser()
@@ -143,7 +153,16 @@ def resolve_config(args: argparse.Namespace) -> tuple[str, str]:
         config.get("base_url"),
         DEFAULT_BASE_URL,
     )
-    return api_key, normalize_base_url(base_url)
+    config_insecure = (
+        truthy(os.environ.get("CODEX_IMG_INSECURE"))
+        or truthy(auth.get("codex_img_insecure"))
+        or truthy(auth.get("insecure"))
+        or truthy(config.get("codex_img_insecure"))
+        or truthy(config.get("insecure"))
+        or truthy(provider.get("codex_img_insecure") if isinstance(provider, dict) else None)
+        or truthy(provider.get("insecure") if isinstance(provider, dict) else None)
+    )
+    return api_key, normalize_base_url(base_url), config_insecure
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -276,8 +295,6 @@ def post_json(
         if use_insecure:
             if attempt > 1:
                 log("TLS certificate verification failed; retrying once with verification disabled")
-            else:
-                log("warning: TLS certificate verification is disabled for this request")
         try:
             with request.urlopen(req, timeout=timeout, context=ssl_context(use_insecure)) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -395,8 +412,6 @@ def post_stream(
     for attempt, use_insecure in enumerate(attempts, start=1):
         if use_insecure and attempt > 1:
             log("TLS certificate verification failed; retrying stream once with verification disabled")
-        elif use_insecure:
-            log("warning: TLS certificate verification is disabled for this request")
         try:
             latest: bytes | None = None
             partial_count = 0
@@ -481,9 +496,12 @@ def generate(args: argparse.Namespace) -> int:
     if not prompt:
         fail("Prompt cannot be empty")
 
-    api_key, base_url = resolve_config(args)
+    api_key, base_url, config_insecure = resolve_config(args)
     url = images_url(base_url)
     out_path = output_path(args.out, args.name)
+    insecure = args.insecure or config_insecure
+    if insecure:
+        log("TLS certificate verification disabled by flag or config")
 
     payload: dict[str, Any] = {
         "model": args.model,
@@ -527,7 +545,7 @@ def generate(args: argparse.Namespace) -> int:
                     api_key,
                     payload,
                     args.timeout,
-                    args.insecure,
+                    insecure,
                     args.strict_tls,
                     args.user_agent,
                     out_path,
@@ -542,11 +560,11 @@ def generate(args: argparse.Namespace) -> int:
                     api_key,
                     payload,
                     args.timeout,
-                    args.insecure,
+                    insecure,
                     args.strict_tls,
                     args.user_agent,
                 )
-            image = extract_image_bytes(response_data, args.timeout, args.insecure, args.strict_tls)
+            image = extract_image_bytes(response_data, args.timeout, insecure, args.strict_tls)
     else:
         with progress("waiting for image generation", args.progress_interval):
             response_data = post_json(
@@ -554,11 +572,11 @@ def generate(args: argparse.Namespace) -> int:
                 api_key,
                 payload,
                 args.timeout,
-                args.insecure,
+                insecure,
                 args.strict_tls,
                 args.user_agent,
             )
-        image = extract_image_bytes(response_data, args.timeout, args.insecure, args.strict_tls)
+        image = extract_image_bytes(response_data, args.timeout, insecure, args.strict_tls)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(image)
     log(f"saved {out_path}")

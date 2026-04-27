@@ -27,7 +27,7 @@ python scripts/codex_img.py generate \
 
 Use `--dry-run` to inspect the resolved URL and payload without sending a request. The script redacts secret values.
 
-The script uses Image API streaming by default, saves partial images, sends a browser-like `User-Agent`, logs waiting progress every 30 seconds, and automatically retries once without TLS certificate verification when a custom endpoint fails with `CERTIFICATE_VERIFY_FAILED`. Use `--no-stream` if a provider behaves badly with SSE, `--strict-tls` to disable TLS fallback, or `--insecure` to skip TLS verification immediately for a trusted endpoint.
+The script uses Image API streaming by default, saves partial images, sends a browser-like `User-Agent`, logs waiting progress every 30 seconds, and automatically retries once without TLS certificate verification when a custom endpoint fails with `CERTIFICATE_VERIFY_FAILED`. Use `codex_img_insecure = true` in provider config to skip the failed TLS probe for a trusted endpoint, `--no-stream` if a provider behaves badly with SSE, `--strict-tls` to disable TLS fallback, or `--insecure` to skip TLS verification immediately.
 
 ## Configuration
 
@@ -41,7 +41,7 @@ Resolve values in this order:
 1. CLI flags: `--api-key`, `--base-url`
 2. Environment variables: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `base_url`
 3. `auth.json`: `OPENAI_API_KEY` and optional `base_url`
-4. `config.toml`: top-level `base_url`, selected `model_provider`, matching `[model_providers.<name>]`, `base_url`, `api_key`, or `api_key_env_var`
+4. `config.toml`: top-level `base_url`, selected `model_provider`, matching `[model_providers.<name>]`, `base_url`, `api_key`, `api_key_env_var`, and optional `codex_img_insecure`
 5. Default base URL: `https://ai.transferai.cc/v1`
 
 Never print API keys. Never commit local config or generated images unless the user explicitly asks.
