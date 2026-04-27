@@ -76,6 +76,9 @@ Use `--dry-run` to preview the request without calling the API.
 
 Reliability defaults:
 
+- Request payload always includes the selected `model`; default is `gpt-image-2`.
+- `/v1/models/{model}` preflight runs when the endpoint supports it.
+- Response `model` fields are validated when present.
 - Image API streaming is enabled by default for `gpt-image-2`.
 - Partial images are saved as `name.partial-1.png`, `name.partial-2.png`, etc.
 - If a provider rejects streaming parameters, the script falls back to a normal request.
@@ -102,4 +105,9 @@ scripts/codex-img generate --no-stream "prompt"
 
 # Faster/lighter generation for slow gateways.
 scripts/codex-img generate --quality low --size 1024x1024 "prompt"
+
+# Fail if the endpoint cannot confirm the model through /models/{model}.
+scripts/codex-img generate --model gpt-image-2 --require-model-check "prompt"
 ```
+
+Note: `/v1/models/{model}` confirms that a compatible endpoint exposes the model ID. It cannot prove a third-party gateway's internal routing if that gateway aliases or hides model metadata. The script also validates response `model` fields when the gateway returns them.

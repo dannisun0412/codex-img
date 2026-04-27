@@ -179,6 +179,13 @@ def images_url(base_url: str) -> str:
     return f"{base}/v1/images/generations"
 
 
+def model_url(base_url: str, model: str) -> str:
+    base = normalize_base_url(base_url)
+    if base.endswith("/v1"):
+        return f"{base}/models/{model}"
+    return f"{base}/v1/models/{model}"
+
+
 def output_path(out: str | None, name: str | None) -> Path:
     if out:
         path = Path(out).expanduser()
@@ -247,6 +254,121 @@ def request_headers(api_key: str, user_agent: str, accept: str) -> dict[str, str
     }
 
 
+def request_with_tls_fallback(
+    req: request.Request,
+    timeout: int,
+    insecure: bool,
+    strict_tls: bool,
+    action: str,
+) -> Any:
+    attempts = [insecure]
+    if not insecure and not strict_tls:
+        attempts.append(True)
+
+    last_error: error.URLError | None = None
+    for attempt, use_insecure in enumerate(attempts, start=1):
+        if use_insecure and attempt > 1:
+            log(f"TLS certificate verification failed; retrying {action} once with verification disabled")
+        try:
+            return request.urlopen(req, timeout=timeout, context=ssl_context(use_insecure))
+        except error.URLError as exc:
+            if isinstance(exc, error.HTTPError):
+                raise
+            if is_ssl_cert_error(exc) and not use_insecure and not strict_tls:
+                last_error = exc
+                continue
+            fail(f"{action} failed: {exc}")
+    fail(f"{action} failed: {last_error}")
+
+
+def get_json(
+    url: str,
+    api_key: str,
+    timeout: int,
+    insecure: bool,
+    strict_tls: bool,
+    user_agent: str,
+    action: str,
+) -> dict[str, Any]:
+    req = request.Request(
+        url,
+        headers=request_headers(api_key, user_agent, "application/json"),
+        method="GET",
+    )
+    try:
+        with request_with_tls_fallback(req, timeout, insecure, strict_tls, action) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body_text = http_error_text(exc)
+        fail(explain_http_error_body(exc, body_text))
+    except json.JSONDecodeError as exc:
+        fail(f"{action} returned invalid JSON: {exc}")
+
+
+def check_model_available(
+    base_url: str,
+    api_key: str,
+    model: str,
+    timeout: int,
+    insecure: bool,
+    strict_tls: bool,
+    user_agent: str,
+) -> bool:
+    url = model_url(base_url, model)
+    log(f"checking model availability: {model}")
+    req = request.Request(
+        url,
+        headers=request_headers(api_key, user_agent, "application/json"),
+        method="GET",
+    )
+    try:
+        with request_with_tls_fallback(req, timeout, insecure, strict_tls, "Model check") as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body_text = http_error_text(exc)
+        if exc.code in {404, 405, 501}:
+            log(f"model check unavailable on this endpoint: status={exc.code}")
+            return False
+        fail(explain_http_error_body(exc, body_text))
+    except json.JSONDecodeError as exc:
+        log(f"model check returned invalid JSON: {exc}")
+        return False
+
+    returned = data.get("id") or data.get("model")
+    if returned and returned != model:
+        fail(f"Model check mismatch: requested={model} returned={returned}")
+    log(f"model available: {returned or model}")
+    return True
+
+
+def event_model(event: dict[str, Any]) -> str | None:
+    value = event.get("model")
+    if isinstance(value, str) and value:
+        return value
+    for container_key in ("data", "item", "output", "response"):
+        container = event.get(container_key)
+        if isinstance(container, dict):
+            found = event_model(container)
+            if found:
+                return found
+        elif isinstance(container, list):
+            for item in container:
+                if isinstance(item, dict):
+                    found = event_model(item)
+                    if found:
+                        return found
+    return None
+
+
+def assert_response_model(data: dict[str, Any], expected: str) -> bool:
+    returned = event_model(data)
+    if not returned:
+        return False
+    if returned != expected:
+        fail(f"Response model mismatch: requested={expected} returned={returned}")
+    return True
+
+
 @contextmanager
 def progress(message: str, interval: int) -> Iterator[None]:
     if interval <= 0:
@@ -286,30 +408,14 @@ def post_json(
         headers=request_headers(api_key, user_agent, "application/json"),
         method="POST",
     )
-    attempts = [insecure]
-    if not insecure and not strict_tls:
-        attempts.append(True)
-
-    last_error: error.URLError | None = None
-    for attempt, use_insecure in enumerate(attempts, start=1):
-        if use_insecure:
-            if attempt > 1:
-                log("TLS certificate verification failed; retrying once with verification disabled")
-        try:
-            with request.urlopen(req, timeout=timeout, context=ssl_context(use_insecure)) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            body_text = http_error_text(exc)
-            fail(explain_http_error_body(exc, body_text))
-        except error.URLError as exc:
-            if is_ssl_cert_error(exc) and not use_insecure and not strict_tls:
-                last_error = exc
-                continue
-            fail(f"Image request failed: {exc}")
-        except json.JSONDecodeError as exc:
-            fail(f"Image request returned invalid JSON: {exc}")
-
-    fail(f"Image request failed: {last_error}")
+    try:
+        with request_with_tls_fallback(req, timeout, insecure, strict_tls, "Image request") as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body_text = http_error_text(exc)
+        fail(explain_http_error_body(exc, body_text))
+    except json.JSONDecodeError as exc:
+        fail(f"Image request returned invalid JSON: {exc}")
 
 
 def explain_http_error_body(exc: error.HTTPError, text: str) -> str:
@@ -396,7 +502,7 @@ def post_stream(
     strict_tls: bool,
     user_agent: str,
     out_path: Path,
-) -> bytes:
+) -> tuple[bytes, bool]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = request.Request(
         url,
@@ -404,48 +510,37 @@ def post_stream(
         headers=request_headers(api_key, user_agent, "text/event-stream"),
         method="POST",
     )
-    attempts = [insecure]
-    if not insecure and not strict_tls:
-        attempts.append(True)
-
-    last_error: error.URLError | None = None
-    for attempt, use_insecure in enumerate(attempts, start=1):
-        if use_insecure and attempt > 1:
-            log("TLS certificate verification failed; retrying stream once with verification disabled")
-        try:
-            latest: bytes | None = None
-            partial_count = 0
-            with request.urlopen(req, timeout=timeout, context=ssl_context(use_insecure)) as response:
-                for event in iter_sse_json(response):
-                    event_type = event.get("type") or event.get("event") or "event"
-                    image = image_bytes_from_event(event)
-                    if image:
-                        latest = image
-                        if "partial" in str(event_type).lower():
-                            partial_count += 1
-                            partial_path = partial_output_path(out_path, partial_count)
-                            partial_path.parent.mkdir(parents=True, exist_ok=True)
-                            partial_path.write_bytes(image)
-                            log(f"saved partial image {partial_count}: {partial_path}")
-                        else:
-                            log(f"received image event: {event_type}")
-                    elif event_type:
-                        log(f"stream event: {event_type}")
-            if latest:
-                return latest
-            fail("Stream completed without image data")
-        except error.HTTPError as exc:
-            body_text = http_error_text(exc)
-            if is_stream_unsupported(exc, body_text):
-                raise StreamUnsupported(body_text) from exc
-            fail(explain_http_error_body(exc, body_text))
-        except error.URLError as exc:
-            if is_ssl_cert_error(exc) and not use_insecure and not strict_tls:
-                last_error = exc
-                continue
-            fail(f"Image stream failed: {exc}")
-
-    fail(f"Image stream failed: {last_error}")
+    try:
+        latest: bytes | None = None
+        partial_count = 0
+        model_seen = False
+        expected_model = str(payload.get("model") or "")
+        with request_with_tls_fallback(req, timeout, insecure, strict_tls, "Image stream") as response:
+            for event in iter_sse_json(response):
+                event_type = event.get("type") or event.get("event") or "event"
+                if expected_model and assert_response_model(event, expected_model):
+                    model_seen = True
+                image = image_bytes_from_event(event)
+                if image:
+                    latest = image
+                    if "partial" in str(event_type).lower():
+                        partial_count += 1
+                        partial_path = partial_output_path(out_path, partial_count)
+                        partial_path.parent.mkdir(parents=True, exist_ok=True)
+                        partial_path.write_bytes(image)
+                        log(f"saved partial image {partial_count}: {partial_path}")
+                    else:
+                        log(f"received image event: {event_type}")
+                elif event_type:
+                    log(f"stream event: {event_type}")
+        if latest:
+            return latest, model_seen
+        fail("Stream completed without image data")
+    except error.HTTPError as exc:
+        body_text = http_error_text(exc)
+        if is_stream_unsupported(exc, body_text):
+            raise StreamUnsupported(body_text) from exc
+        fail(explain_http_error_body(exc, body_text))
 
 
 def fetch_url(url: str, timeout: int, insecure: bool, strict_tls: bool) -> bytes:
@@ -534,13 +629,29 @@ def generate(args: argparse.Namespace) -> int:
         )
         return 0
 
+    if args.check_model:
+        checked = check_model_available(
+            base_url,
+            api_key,
+            args.model,
+            args.timeout,
+            insecure,
+            args.strict_tls,
+            args.user_agent,
+        )
+        if not checked:
+            if args.require_model_check:
+                fail(f"Model check required but endpoint does not expose /models/{args.model}")
+            log("model preflight skipped; endpoint did not expose compatible /models/{model}")
+
     log(f"POST {url}")
     log(f"model={args.model} size={args.size} output={out_path}")
     image: bytes
+    model_seen = False
     if args.stream:
         try:
             with progress("waiting for streaming image generation", args.progress_interval):
-                image = post_stream(
+                image, model_seen = post_stream(
                     url,
                     api_key,
                     payload,
@@ -565,6 +676,7 @@ def generate(args: argparse.Namespace) -> int:
                     args.user_agent,
                 )
             image = extract_image_bytes(response_data, args.timeout, insecure, args.strict_tls)
+            model_seen = assert_response_model(response_data, args.model)
     else:
         with progress("waiting for image generation", args.progress_interval):
             response_data = post_json(
@@ -577,6 +689,9 @@ def generate(args: argparse.Namespace) -> int:
                 args.user_agent,
             )
         image = extract_image_bytes(response_data, args.timeout, insecure, args.strict_tls)
+        model_seen = assert_response_model(response_data, args.model)
+    if not model_seen:
+        log(f"response did not declare model; request model was {args.model}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(image)
     log(f"saved {out_path}")
@@ -591,6 +706,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser = subparsers.add_parser("generate", help="generate an image")
     generate_parser.add_argument("prompt", help="image prompt")
     generate_parser.add_argument("--model", default=DEFAULT_MODEL, help=f"model name (default: {DEFAULT_MODEL})")
+    generate_parser.add_argument("--check-model", dest="check_model", action="store_true", default=True, help="check /models/{model} before generation")
+    generate_parser.add_argument("--no-check-model", dest="check_model", action="store_false", help="skip /models/{model} preflight check")
+    generate_parser.add_argument("--require-model-check", action="store_true", help="fail if /models/{model} is unavailable")
     generate_parser.add_argument("--size", default=DEFAULT_SIZE, help=f"image size (default: {DEFAULT_SIZE})")
     generate_parser.add_argument("--quality", choices=("low", "medium", "high", "auto"), help="image quality")
     generate_parser.add_argument("--output-format", choices=("png", "jpeg", "webp"), help="image output format")

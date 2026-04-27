@@ -31,6 +31,8 @@ Use `--dry-run` to inspect the resolved URL and payload without sending a reques
 
 The script uses Image API streaming by default, saves partial images, sends a browser-like `User-Agent`, logs waiting progress every 30 seconds, and automatically retries once without TLS certificate verification when a custom endpoint fails with `CERTIFICATE_VERIFY_FAILED`. Use `codex_img_insecure = true` in provider config to skip the failed TLS probe for a trusted endpoint, `--no-stream` if a provider behaves badly with SSE, `--strict-tls` to disable TLS fallback, or `--insecure` to skip TLS verification immediately.
 
+The script sends `model` exactly as requested, defaults to `gpt-image-2`, checks `/v1/models/{model}` when the endpoint supports it, and validates response `model` fields when present. Use `--require-model-check` to fail if the endpoint does not expose `/models/{model}`. If the provider does not expose model metadata and omits model fields in image events, the script can only verify the request payload, not the provider's internal routing.
+
 ## Configuration
 
 Resolve credentials automatically from the current OS user config:
@@ -72,3 +74,9 @@ The script sends:
 It accepts either streamed image events, `data[0].b64_json`, or `data[0].url`, decodes or downloads the image, and saves it to `~/.codex/generated_images/codex-img/` unless `--out` is provided. Partial streamed images are saved next to the target output as `.partial-N` files.
 
 For long image generations, prefer streaming because partial-image events keep the connection active and reduce upstream idle-timeout risk. If an endpoint blocks automation at Cloudflare, the script reports the Cloudflare code and detail instead of a generic HTTP 403.
+
+For strict model validation:
+
+```bash
+scripts/codex-img generate --model gpt-image-2 --require-model-check "prompt"
+```
