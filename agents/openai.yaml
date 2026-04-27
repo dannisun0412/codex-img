@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Img"
+  short_description: "Generate images from Codex API config."
+  default_prompt: "Generate an image using the current Codex API configuration."

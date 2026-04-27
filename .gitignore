@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+generated_images/
+*.png
+*.jpg
+*.jpeg
+*.webp
+auth.json
+config.toml
+.env
